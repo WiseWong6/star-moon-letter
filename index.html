@@ -13,19 +13,25 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden}
 body{display:grid;place-items:center;padding-bottom:88px;background:#0b1121;color:var(--white);font-family:'霞鹜文楷',serif}
 main{position:relative;isolation:isolate;overflow:hidden;width:min(100vw,calc((100vh - 88px)*.75),840px);width:min(100vw,calc((100svh - 88px)*.75),840px);aspect-ratio:3/4;container-type:inline-size;background:#164df2}
 canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:4}
+#galaxy{z-index:1;mix-blend-mode:screen}
+#illumination{z-index:2;mix-blend-mode:screen}
 .composer{position:absolute;z-index:3;left:50%;top:70%;transform:translate(-50%,-50%);width:72%}
 main[data-font="brush"] .composer{font-family:'Ma Shan Zheng','霞鹜文楷',serif}
 .field{position:relative;border:.65px solid #ffffff60;border-top-color:#ffffff9c;border-bottom-color:#ffffff38;background:linear-gradient(145deg,#ffffff29 0%,#ffffff0d 54%,#ffffff17 100%);-webkit-backdrop-filter:blur(10px) saturate(135%);backdrop-filter:blur(10px) saturate(135%);box-shadow:inset 0 1px 0 #ffffff29,inset 0 -1px 0 #ffffff0d,0 5px 18px #08258c20;border-radius:999px;height:8cqw;min-height:38px;display:flex;align-items:center;padding:0 2.7cqw;transition:border-color .3s}
 .field:focus-within{border-color:#ffffffa3}
+.field::before,.field::after{content:'';position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:var(--source-light,0)}
+.field::before{background:linear-gradient(180deg,#f5faff14,#ffffff03 48%,transparent)}
+.field::after{inset:0 auto auto 4%;width:92%;height:1px;background:linear-gradient(90deg,transparent,#f5faffbd 12%,#f5faffbd 88%,transparent);box-shadow:0 -1px 7px #e8f4ff1c}
 .words{position:relative;z-index:1;display:flex;align-items:center;white-space:pre;overflow:hidden;width:calc(100% - 5.2cqw);height:100%;font-size:clamp(12px,2.7cqw,20px);line-height:1.35;letter-spacing:.025em;font-weight:400}
 .words span{display:inline-block;flex-shrink:0}
 #input{position:absolute;z-index:2;left:2.7cqw;top:0;width:calc(100% - 10.6cqw);height:100%;border:0;outline:0;background:transparent;color:transparent;caret-color:transparent;font:inherit;opacity:0}
 button{font:inherit;color:inherit;cursor:pointer}
-#send{position:absolute;z-index:2;right:1.1cqw;top:50%;transform:translateY(-50%);width:4.5cqw;height:4.5cqw;min-width:24px;min-height:24px;border:0;border-radius:50%;background:transparent;display:grid;place-items:center;padding:0;transition:background .25s,opacity .25s}
+#send{position:absolute;z-index:2;right:1.1cqw;top:50%;transform:translateY(-50%);width:4.5cqw;height:4.5cqw;min-width:24px;min-height:24px;border:0;border-radius:50%;background:transparent;display:grid;place-items:center;padding:0;transition:background .25s}
 #send:hover{background:#ffffff12}
 #send:active{background:#ffffff26}
-#send:disabled{opacity:.4;cursor:default}
-#send svg{width:2.5cqw;height:2.5cqw;min-width:14px;min-height:14px}
+#send:disabled{cursor:default}
+#send svg{grid-area:1/1;width:2.5cqw;height:2.5cqw;min-width:14px;min-height:14px;transform-origin:center;pointer-events:none}
+#send .send-progress{opacity:0;transform:scale(.9);width:2.9cqw;height:2.9cqw;min-width:18px;min-height:18px}
 body[data-theme="ink"]{background:#05070a}
 body[data-theme="ink"] .playback{background:#171a20db;border-color:#ffffff1f}
 main[data-theme="ink"]{background:#080a0e}
@@ -50,12 +56,17 @@ main[data-theme="ink"] .field{background:linear-gradient(145deg,#ffffff16,#fffff
 </head>
 <body data-theme="ink">
 <main data-theme="ink" data-font="wenkai" aria-label="星月来信，墨黑星河">
+<canvas id="galaxy" aria-hidden="true"></canvas>
+<canvas id="illumination" aria-hidden="true"></canvas>
 <canvas id="sky" aria-hidden="true"></canvas>
 <section class="composer" aria-label="星月输入框">
 <div class="field">
 <div class="words" aria-hidden="true"></div>
 <input id="input" aria-label="写下一句话，回车发送" maxlength="28" autocomplete="off">
-<button id="send" aria-label="发送，让文字化成星月"><svg viewBox="0 0 24 24" fill="none"><path d="M12 19V5m-6 6 6-6 6 6" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+<button id="send" data-state="idle" aria-label="发送，让文字化成星月" aria-busy="false">
+<svg class="send-arrow" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" stroke="currentColor" stroke-width="1.15" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<svg class="send-progress" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10.2" stroke="currentColor" stroke-opacity=".18" stroke-width="1.1"/><circle class="send-spinner" cx="12" cy="12" r="10.2" stroke="currentColor" stroke-width="1.1" stroke-dasharray="18 46.1" stroke-linecap="round"/><rect x="8.6" y="8.6" width="6.8" height="6.8" rx="1" fill="currentColor"/></svg>
+</button>
 </div>
 </section>
 </main>
@@ -63,11 +74,14 @@ main[data-theme="ink"] .field{background:linear-gradient(145deg,#ffffff16,#fffff
 <button id="play-toggle" type="button" disabled>播放</button>
 <input id="play-progress" type="range" min="0" max="30" step="0.01" value="0" aria-label="动画进度" disabled>
 <button id="play-speed" type="button" aria-label="播放速度 1 倍，点击切换" disabled>1×</button>
-<button id="play-sound" type="button" aria-label="开启音效" aria-pressed="false" disabled>音效关</button>
+<button id="play-sound" type="button" aria-label="关闭音效" aria-pressed="true" disabled>音效开</button>
 <select id="play-font" aria-label="文案字体：霞鹜文楷" title="文案字体：霞鹜文楷" disabled><option value="wenkai">文楷</option><option value="brush">书法</option></select>
-<select id="play-theme" aria-label="配色与动画版本" disabled><option value="ink">墨黑</option><option value="blue">正蓝</option></select>
+<select id="play-theme" aria-label="配色" disabled><option value="ink">墨黑</option><option value="blue">正蓝</option></select>
 <output id="play-time" for="play-progress">00:00 / 00:00</output>
 </div>
+<script src="audio/sound-bank.js"></script>
 <script src="sound.js"></script>
+<script src="chime-score.js"></script>
+<script src="assets/galaxy-stars.js"></script>
 <script src="animation.js"></script>
 </body></html>

@@ -1,13 +1,23 @@
 'use strict';
 const stage = document.querySelector('main');
 const canvas = document.querySelector('#sky'), ctx = canvas.getContext('2d');
+const galaxyCanvas=document.querySelector('#galaxy'),galaxyCtx=galaxyCanvas.getContext('2d');
+const illuminationCanvas=document.querySelector('#illumination'),illuminationCtx=illuminationCanvas.getContext('2d');
+const galaxyImage=new Image();
+const galaxyReady=new Promise(resolve=>{
+  galaxyImage.onload=()=>resolve(true);galaxyImage.onerror=()=>resolve(false);
+  galaxyImage.src='./assets/galaxy-sky.png';
+});
+let galaxyFrameTime=-1,galaxyFrameCycle=null,galaxyRevealMask=null,galaxyMaskPixels=null;
 const words = document.querySelector('.words'), input = document.querySelector('#input');
 const send = document.querySelector('#send'), field = document.querySelector('.field');
+const sendArrow=send.querySelector('.send-arrow'),sendProgress=send.querySelector('.send-progress'),sendSpinner=send.querySelector('.send-spinner');
 const composer = document.querySelector('.composer');
 const sound = new StarLetterSound();
 const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const W = 660, H = 880;
-const BURST_COUNT = 84;
+const BURST_COUNT = 126;
+const SKY_LOOP = 9;
 const FLIGHT_RATE = 1.44;
 const TYPE_INTERVAL = .175;
 const TRAIL_FADE = 2.4;
@@ -39,6 +49,10 @@ function resize(){
   viewScale=rect.width/W;
   canvas.width=Math.round(rect.width*d);canvas.height=Math.round(rect.height*d);
   ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);
+  galaxyCanvas.width=canvas.width;galaxyCanvas.height=canvas.height;
+  galaxyCtx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);galaxyFrameTime=-1;
+  illuminationCanvas.width=canvas.width;illuminationCanvas.height=canvas.height;
+  illuminationCtx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);
   if(water)measureWater();
 }
 addEventListener('resize',resize);resize();
@@ -47,6 +61,7 @@ function setText(value){
   text=value;input.value=value;words.replaceChildren();
   for(const ch of Array.from(value)){const s=document.createElement('span');s.textContent=ch;words.append(s);}
   words.scrollLeft=words.scrollWidth;send.disabled=busy||!value.trim();
+  if(editing)updateSendState(clock);
 }
 
 // 打字、波纹、飞行和控制条共用同一个可暂停、可回看的时间。
@@ -54,6 +69,31 @@ function prepareTyping(value){
   setText(value);
   const spans=[...words.querySelectorAll('span')],fontSize=parseFloat(getComputedStyle(words).fontSize);
   typing={value,chars:Array.from(value),spans,widths:spans.map(s=>s.getBoundingClientRect().width/fontSize),previous:[]};
+}
+
+function sendWorkingAt(time){
+  return !editing&&Boolean(cycle)&&time>=cycle.sendAt&&time<cycle.transformEnd;
+}
+
+function updateSendState(time){
+  const working=sendWorkingAt(time);
+  send.dataset.state=working?'working':'idle';
+  send.setAttribute('aria-busy',String(working));
+  send.setAttribute('aria-label',working?'停止变化':'发送，让文字化成星月');
+  send.disabled=working?false:busy||!text.trim();
+  // 完成后仍保留一小段图标交接：圆环减速收住，箭头渐显，回看与暂停保持一致。
+  const elapsed=cycle?time-cycle.sendAt:0,finish=cycle?time-cycle.transformEnd:0;
+  const mix=editing||!cycle?0:reduce?Number(working):smooth(elapsed/.22)*(1-smooth(finish/.64));
+  if(!editing){
+    const decel=clamp(finish/.64);
+    const rotationTime=cycle?Math.max(0,Math.min(time,cycle.transformEnd)-cycle.sendAt)+.64*(decel-decel*decel/2):0;
+    sendSpinner.setAttribute('transform',`rotate(${reduce?0:rotationTime*260%360} 12 12)`);
+  }
+  sendProgress.style.opacity=String(mix);
+  sendProgress.style.transform=`scale(${.9+.1*mix})`;
+  sendArrow.style.opacity=String(1-mix);
+  sendArrow.style.transform=`translateY(${2*mix}px) scale(${1-.12*mix})`;
+  send.style.opacity=String(send.disabled ? .4+.6*mix : 1);
 }
 
 function drawTyping(time){
@@ -69,10 +109,7 @@ function drawTyping(time){
   text=sent?'':typing.chars.slice(0,Math.ceil(progress)).join('');
   if(input.value!==text)input.value=text;
   words.scrollLeft=words.scrollWidth;
-  busy=sent&&time<playback.duration;input.disabled=busy;send.disabled=busy||!text.trim();
-  const pulse=reduce?0:Math.sin(clamp((time-cycle.sendAt)/.48)*Math.PI);
-  send.firstElementChild.style.transform=`translateY(${-3*pulse}px)`;
-  send.firstElementChild.style.opacity=String(1-.6*pulse);
+  busy=sent&&time<playback.duration;input.disabled=busy;updateSendState(time);
 }
 
 // 每侧上下翅是一张固定轮廓，展翅只改变它绕身体转动后的可见宽度。
@@ -246,7 +283,8 @@ function prepareBurst(at){
       const x=random(left+9,right-9),y=centerY+random(-6,6);
       burst.push(createParticle(x,y,i,arrival(x,y)+random(.12,.38)));
     }
-    if(theme==='ink')arrangeStarfield(burst);else chooseKites(burst);
+    arrangeStarfield(burst);
+    cycle.lightEnd=Math.max(...burst.map(p=>p.start+p.duration))+.8;
     particles.push(...burst);
     finishAt=Math.max(finishAt,...burst.map(p=>p.start+flightEnd(p)+(p.hasTrail?TRAIL_FADE:0)));
   }
@@ -369,7 +407,7 @@ function glintTexture(material){
   halo.addColorStop(0,'#ffffff');halo.addColorStop(.16,`rgba(${tint},.95)`);
   halo.addColorStop(.42,`rgba(${tint},.3)`);halo.addColorStop(1,`rgba(${tint},0)`);
   g.fillStyle=halo;g.fillRect(-6.5,-6.5,13,13);
-  const reach=key==='star'?22:12*2.6,halfWidth=key==='star'?.38:1.3;
+  const reach=key==='star'?26:12*2.6,halfWidth=key==='star'?1.25:1.3;
   const rays=key==='star'?[[0,reach,1],[Math.PI/2,reach,1]]:
     [[.1,reach,1],[Math.PI/2+.1,reach*.75,1],[Math.PI/4+.1,reach*.43,.38],[Math.PI*.75+.1,reach*.43,.38]];
   for(const [angle,length,gain] of rays){
@@ -572,6 +610,52 @@ function waterRefraction(x,y,waves){
   return {x:slope.x*5.5,y:slope.y*5.5};
 }
 
+let sourceBeamTexture=null;
+let sourceBeamBounds=null;
+function sourceLight(time){
+  if(!water||!cycle||reduce||editing)return {glow:0,beam:0};
+  const age=time-water.start,fade=1-smooth((time-cycle.lightEnd+2.4)/2.4);
+  return {glow:smooth(age/.24)*fade,beam:smooth((age-.06)/.3)*fade};
+}
+
+function drawSourceBeam(light){
+  illuminationCtx.clearRect(0,0,W,H);
+  if(light.beam<=0)return;
+  const sourceLeft=(water.x+water.width*.025)/W*320;
+  const sourceRight=(water.x+water.width*.975)/W*320;
+  if(!sourceBeamTexture){
+    sourceBeamTexture=document.createElement('canvas');sourceBeamTexture.width=320;sourceBeamTexture.height=512;
+  }
+  if(!sourceBeamBounds||Math.abs(sourceBeamBounds[0]-sourceLeft)>.01||Math.abs(sourceBeamBounds[1]-sourceRight)>.01){
+    const g=sourceBeamTexture.getContext('2d'),pixels=g.createImageData(320,512);
+    const sourceRow=492;
+    for(let row=0;row<512;row++){
+      const distance=Math.max(0,(sourceRow-row-.5)/sourceRow);
+      // 两条光边分别连接输入框两端与画面两个上角，全程保持直线。
+      const left=sourceLeft*(1-distance),right=sourceRight+(320-sourceRight)*distance;
+      const ends=smooth((sourceRow-row+2.5)/6);
+      for(let col=0;col<320;col++){
+        const x=col+.5,dy=row+.5-sourceRow,across=(2*x-left-right)/(right-left);
+        const edge=smooth((x-left)/5)*smooth((right-x)/5);
+        // 亮度写进颜色后整体轻叠，保留更多渐变层级；薄光面不会盖灰底图。
+        const sheet=218*(.96+.04*Math.exp(-across*across*2))/(1+distance*4.5);
+        const rim=smooth((x-sourceLeft)/5)*smooth((sourceRight-x)/5);
+        const aperture=37*Math.exp(-dy*dy/2)*rim;
+        const luminance=Math.min(255,sheet+aperture),index=(row*320+col)*4;
+        pixels.data[index]=Math.round(luminance*.96);pixels.data[index+1]=Math.round(luminance*.985);pixels.data[index+2]=Math.round(luminance);
+        pixels.data[index+3]=Math.round(255*ends*edge);
+      }
+    }
+    g.putImageData(pixels,0,0);
+    sourceBeamBounds=[sourceLeft,sourceRight];
+  }
+  const x=water.x+water.width/2,y=water.y+water.height*.025;
+  illuminationCtx.save();illuminationCtx.globalAlpha=light.beam*.16;
+  illuminationCtx.translate(x,y);
+  // 整个框面一起向上照亮，只改变亮度，光的边界与长度保持稳定。
+  illuminationCtx.drawImage(sourceBeamTexture,-x,-y,W,y*512/492);illuminationCtx.restore();
+}
+
 function waterGlyph(p){
   const ratio=Math.min(2,canvas.width/W),key=`${p.font}|${ratio}`;
   if(p.waterGlyph&&p.waterGlyph.key===key)return p.waterGlyph;
@@ -640,102 +724,226 @@ function drawDepartingText(p,age,waves=[]){
   ctx.restore();
 }
 
-// 星河只以点的疏密形成流向；同一轮固定落点，不画星座连线。
-function galaxyPoint(){
-  const gaussian=()=>Math.sqrt(-2*Math.log(Math.max(.0001,Math.random())))*Math.cos(random(0,Math.PI*2));
-  for(let attempt=0;attempt<40;attempt++){
-    const t=Math.random(),inBand=Math.random()<.86;
-    const x=inBand?W*(.06+.88*t+gaussian()*.035):random(W*.035,W*.965);
-    const y=inBand?H*(.57-.4*t+.045*Math.sin(t*Math.PI*1.6)+gaussian()*(.037+.04*Math.sin(t*Math.PI))):random(H*.055,H*.62);
-    if(x>W*.03&&x<W*.97&&y>H*.045&&y<H*.63)return {x,y,inBand};
+// 落点来自底图真实亮星的像素位置，形状、疏密和色彩由同一张底图保持一致。
+function galaxyTargets(){
+  const points=GALAXY_STARS.map(([x,y,r,g,b,strength,cloud])=>({x:x*W,y:y*H,color:`rgb(${r},${g},${b})`,strength,cloud}));
+  for(let i=points.length-1;i>0;i--){const j=Math.floor(random(0,i+1));[points[i],points[j]]=[points[j],points[i]];}
+  return points;
+}
+
+function galaxyBand(x){
+  const at=clamp(x/W)*(GALAXY_RIDGE.length-1),index=Math.min(GALAXY_RIDGE.length-2,Math.floor(at)),t=at-index;
+  const a=GALAXY_RIDGE[index],b=GALAXY_RIDGE[index+1],mix=i=>(a[i]+(b[i]-a[i])*t)*H;
+  return {center:mix(1),upper:mix(2),lower:mix(3)};
+}
+
+function prepareGalaxyReveal(stars){
+  const regions=stars.filter(p=>p.settle.anchor).map(p=>({x:p.endX,y:p.endY,
+    born:p.start+p.duration+.55,source:p}));
+  // 先让物品一一落在底图星位，留下持续闪烁的星点，再展开整条星带。
+  const start=Math.max(...stars.map(p=>p.start+p.duration))+.55;
+  const width=Math.ceil(W/3),height=Math.ceil(H/3),onsets=new Float32Array(width*height),rise=2.8;
+  let last=0;
+  // 中轴来自原图星云的弯曲走向，两侧按各自宽度柔和展开；没有圆斑或横向扫光。
+  for(let col=0;col<width;col++){
+    const band=galaxyBand((col+.5)/width*W);
+    for(let row=0;row<height;row++){
+      const across=(row+.5)/height*H-band.center;
+      const distance=Math.abs(across)/(across<0?band.upper:band.lower);
+      const at=start+3.2*(1-Math.exp(-distance*.9));
+      onsets[row*width+col]=at;last=Math.max(last,at);
+    }
   }
-  return {x:random(W*.08,W*.92),y:random(H*.1,H*.55)};
+  return {start,end:last+rise,regions,width,height,onsets,rise};
+}
+
+function clearGalaxySky(){
+  if(galaxyFrameTime!==0||galaxyFrameCycle!==cycle)galaxyCtx.clearRect(0,0,W,H);
+  galaxyFrameTime=0;galaxyFrameCycle=cycle;
+}
+
+function drawGalaxySky(){
+  const sky=cycle?.sky;
+  if(!sky||reduce||editing||!galaxyImage.complete||!galaxyImage.naturalWidth){clearGalaxySky();return;}
+  if(clock<=sky.start){clearGalaxySky();return;}
+  // 完整亮起后底图保持静止；只有上面的少量星芒继续闪烁。
+  const complete=clock>=sky.end,frame=complete?Infinity:clock;
+  if(galaxyFrameCycle===cycle&&galaxyFrameTime===frame)return;
+  galaxyFrameCycle=cycle;galaxyFrameTime=frame;
+  galaxyCtx.clearRect(0,0,W,H);
+  galaxyCtx.drawImage(galaxyImage,0,0,W,H);
+  if(complete)return;
+  if(!galaxyRevealMask){
+    galaxyRevealMask=document.createElement('canvas');galaxyRevealMask.width=sky.width;galaxyRevealMask.height=sky.height;
+    galaxyMaskPixels=galaxyRevealMask.getContext('2d').createImageData(sky.width,sky.height);
+    for(let i=0;i<galaxyMaskPixels.data.length;i+=4)galaxyMaskPixels.data.fill(255,i,i+3);
+  }
+  const mask=galaxyRevealMask.getContext('2d');
+  for(let i=0;i<sky.onsets.length;i++)galaxyMaskPixels.data[i*4+3]=Math.round(255*smooth((clock-sky.onsets[i])/sky.rise));
+  mask.putImageData(galaxyMaskPixels,0,0);
+  galaxyCtx.save();galaxyCtx.globalCompositeOperation='destination-in';
+  galaxyCtx.drawImage(galaxyRevealMask,0,0,W,H);galaxyCtx.restore();
+}
+
+let galaxyStarGlow=null;
+function drawStarGlow(x,y,size,alpha){
+  if(!galaxyStarGlow){
+    galaxyStarGlow=document.createElement('canvas');galaxyStarGlow.width=galaxyStarGlow.height=48;
+    const g=galaxyStarGlow.getContext('2d'),light=g.createRadialGradient(24,24,0,24,24,24);
+    light.addColorStop(0,'rgba(255,255,255,.9)');light.addColorStop(.12,'rgba(230,241,255,.58)');
+    light.addColorStop(.34,'rgba(153,193,255,.15)');light.addColorStop(1,'rgba(121,173,255,0)');
+    g.fillStyle=light;g.fillRect(0,0,48,48);
+  }
+  ctx.save();ctx.globalCompositeOperation='screen';ctx.globalAlpha=alpha;
+  ctx.drawImage(galaxyStarGlow,x-size/2,y-size/2,size,size);ctx.restore();
+}
+
+function nearestStar(point,stars){
+  let source=stars[0],distance=Infinity;
+  for(const star of stars){const d=Math.hypot(point.x-star.endX,point.y-star.endY);if(d<distance){distance=d;source=star;}}
+  return {source,distance,arrival:source.start+source.duration+.65};
 }
 
 function arrangeStarfield(burst){
-  const targets=[];
-  for(let i=0;i<burst.length;i++){
-    let point;
-    for(let attempt=0;attempt<60;attempt++){
-      point=galaxyPoint();
-      if(targets.every(q=>Math.hypot(q.x-point.x,q.y-point.y)>13))break;
-    }
-    targets.push(point);
+  const points=galaxyTargets(),anchors=[];
+  // 在银河亮部横向选六颗星，背景亮度来自底图采样，避免落点全散在空暗处。
+  for(let i=0;i<6;i++){
+    const candidates=points.filter(p=>p.x>=W*i/6&&p.x<W*(i+1)/6);
+    const target=candidates.sort((a,b)=>b.cloud*(.8+.2*b.strength)-a.cloud*(.8+.2*a.strength))[0];
+    if(target)anchors.push(target);
   }
-  burst.forEach((p,i)=>{
+  const maxCloud=Math.max(...points.map(p=>p.cloud));
+  const remainder=points.filter(p=>!anchors.includes(p)).map(p=>({point:p,
+    priority:-Math.log(Math.max(.0001,random(0,1)))/(.08+8*(p.cloud/maxCloud)**1.8)
+  })).sort((a,b)=>a.priority-b.priority).map(p=>p.point);
+  const targets=[...anchors,...remainder.slice(0,burst.length-anchors.length)];
+  const accents=[],ranked=targets.slice().sort((a,b)=>(b.strength*.45+b.cloud/maxCloud*.55)-(a.strength*.45+a.cloud/maxCloud*.55));
+  // 在银河内部选出清楚的主星，其余星芒分散在画幅内。
+  const inner=ranked.filter(p=>p.x>W*.26&&p.x<W*.74&&p.y>H*.07&&p.y<H*.56);
+  for(const [pool,limit] of [[inner,4],[ranked,6]]){
+    for(const target of pool){
+      if(accents.length>=limit)break;
+      if(accents.every(q=>Math.hypot(q.x-target.x,q.y-target.y)>85))accents.push(target);
+    }
+  }
+  targets.sort((a,b)=>a.x-b.x);
+  const ordered=burst.slice().sort((a,b)=>a.x-b.x);
+  const firstAnchor=Math.max(...burst.map(p=>p.start))+4.1;
+  const arrivalOffsets=anchors.map(()=>random(0,.7));
+  ordered.forEach((p,i)=>{
     const target=targets[i],dx=target.x-p.x,dy=target.y-p.y,length=Math.hypot(dx,dy)||1;
+    const approach=Math.min(length*.2,random(35,66)),accent=accents.includes(target),anchor=anchors.indexOf(target);
     p.endX=target.x;p.endY=target.y;
-    p.settle={accent:i%6===0,period:random(3.6,6),offset:random(0,6),scale:random(.25,.48),radius:random(.85,1.65),
-      brightness:random(.8,1),
-      c1:{x:p.x+dx*.3+random(-16,20),y:p.y+dy*.4},
-      c2:{x:target.x-dx/length*random(24,42),y:target.y-dy/length*random(24,42)}};
-    p.duration=random(6.8,9.8)/FLIGHT_RATE;
-    p.hasTrail=i%5===0;p.flashAt=p.duration*.46;p.flashGap=p.duration*.38;
+    p.settle={accent,anchor:anchor>=0,period:accent?random(3.4,5):random(5.2,7.8),offset:random(0,8.2),scale:anchor>=0?.54:random(.23,.43),color:target.color,
+      radius:accent?random(.7,1.05):random(.32,.6),brightness:accent?random(.85,1):random(.55,.8),
+      twinkleSize:accent?9:anchor>=0?7.2:4+target.strength*1.5,twinkleGain:accent||anchor>=0?1:.72,
+      c1:{x:p.x+dx*.18,y:p.y+dy*.43},c2:{x:target.x-dx*.13,y:target.y+approach}};
+    p.duration=anchor>=0?firstAnchor+arrivalOffsets[anchor]-p.start:random(6.8,9.8)/FLIGHT_RATE;
+    p.hasTrail=anchor>=0||i%10===0;p.flashAt=p.duration*.46;p.flashGap=p.duration*.38;
     p.flight=buildFlight(p);p.speed=p.flight.at(-1).distance/p.duration;
   });
   cycle.symbols=burst;
   cycle.firstSettle=Math.min(...burst.map(p=>p.start+p.duration+.65));
-  cycle.settledAt=Math.max(...burst.map(p=>p.start+p.duration+2.5));
-  // 远处的大量小星点衬出星河，近处只留少量亮点，不增加飞行物品负担。
-  cycle.dust=[];
-  for(let i=0;i<1440;i++){
-    const point=galaxyPoint(),near=i%8===0;
-    cycle.dust.push({...point,r:near?random(.85,1.2):random(.34,.74),
-      alpha:(near?random(.65,.9):random(.34,.65))*(point.inBand?1:.65),phase:random(0,Math.PI*2),
-      born:cycle.firstSettle+random(-1,4.6),rise:random(1.8,3.4),rate:random(.22,.62),
-      sparkle:i%48===0?{period:random(4,7),offset:random(0,7),size:random(7,10)}:null});
+  cycle.sky=prepareGalaxyReveal(burst);
+  cycle.composerExit={start:cycle.firstSettle+.25,end:Math.max(...burst.map(p=>p.start+p.duration))+.8};
+  // 底图已有细星，只加少量与底图位置重合的动态亮星。
+  const unselected=points.filter(p=>!targets.includes(p));
+  cycle.dust=unselected.slice(0,32).map((point,i)=>{
+    const trigger=nearestStar(point,burst),depth=i%8===0?0:2;
+    return {...point,depth,r:depth===0?random(.6,.85):random(.25,.45),alpha:depth===0?.8:.55,
+      phase:random(0,Math.PI*2),source:trigger.source,
+      born:trigger.arrival+.2+Math.min(1,trigger.distance/180),rise:1.8,
+      rate:Math.PI*2/SKY_LOOP*(i%3===0?2:1),sparkle:null};
+  });
+  for(const point of cycle.dust){
+    if(point.depth!==0||accents.some(q=>Math.hypot(q.x-point.x,q.y-point.y)<85))continue;
+    point.sparkle={period:random(7,11),offset:random(0,11),size:random(5.5,7)};
+    accents.push(point);
   }
+  cycle.settledAt=Math.max(cycle.sky.end,...burst.map(p=>p.start+p.duration+2.5),
+    ...cycle.dust.map(p=>p.born+p.rise));
+  cycle.loopStart=cycle.settledAt+1;
 }
 
-function starAmount(p,time){return smooth((time-p.start-p.duration-.65)/1.8);}
+function starAmount(p,time){return smooth((time-p.start-p.duration)/.95);}
+function landingFlash(p,time){
+  const age=time-p.start-p.duration;
+  return smooth(age/.16)*(1-smooth((age-.28)/.95))*(p.settle.anchor?1:p.settle.accent?.8:.52);
+}
 // 参考花落成蝶的停驻星光：亮核升起、细长十字展开，再缓缓收回。
 function starTwinkle(age,period,offset){
   if(reduce||age<=0)return 0;
+  // 星芒的周期整齐落在尾段循环内，随机相位保留错落感，循环接缝不会跳亮。
+  period=SKY_LOOP/Math.max(1,Math.round(SKY_LOOP/period));
   const phase=(age+offset)%period;
-  return smooth(age/1.2)*smooth(phase/.45)*(1-smooth((phase-.45)/.85));
+  return smooth(age/1.2)*smooth(phase/.3)*(1-smooth((phase-.5)/.95));
+}
+// 银河亮起后提高星芒的清晰度，随底图收尾渐进增强，避免被亮星云淹没。
+function skySparkleStrength(time){
+  return cycle?.sky?smooth((time-cycle.sky.end+2.4)/2.4):0;
 }
 function drawStarfield(){
-  if(theme!=='ink'||!cycle.symbols||reduce)return;
-  ctx.save();ctx.fillStyle='#f5f7ff';
+  drawGalaxySky();
+  if(!cycle.symbols||reduce)return;
+  const clarity=skySparkleStrength(clock);
+  ctx.save();
   for(const p of cycle.dust){
-    const appear=smooth((clock-p.born)/p.rise);
-    if(appear<=0)continue;
-    const shimmer=.84+.11*Math.sin(clock*p.rate+p.phase)+.05*Math.sin(clock*p.rate*1.71+p.phase*2);
-    ctx.globalAlpha=appear*p.alpha*shimmer;
+    const appear=smooth((clock-p.born)/p.rise);if(appear<=0)continue;
+    const shimmer=p.depth===2?.95+.05*Math.sin(clock*p.rate+p.phase):
+      .88+.08*Math.sin(clock*p.rate+p.phase)+.04*Math.sin(clock*p.rate*2+p.phase*2);
+    if(p.depth<2)drawStarGlow(p.x,p.y,p.r*(p.depth===0?10:6),appear*p.alpha*shimmer*.52);
+    ctx.globalAlpha=appear*p.alpha*shimmer;ctx.fillStyle=p.color;
     ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();
     if(p.sparkle){
       const flash=starTwinkle(clock-p.born,p.sparkle.period,p.sparkle.offset);
-      ctx.globalAlpha=appear;
-      glint(p.x,p.y,flash,p.sparkle.size,'star');
+      ctx.globalAlpha=appear;glint(p.x,p.y,flash,p.sparkle.size*(1+.4*clarity),'star');
     }
   }
   ctx.restore();
 }
 
-function drawInkItem(p,age){
+function drawSettlingItem(p,age){
   const q=poseAt(p,age),star=starAmount(p,clock),visible=smooth(age/p.revealDuration);
   if(star<.999){
     ctx.save();ctx.translate(q.x,q.y);ctx.scale(q.scale,q.scale);
     drawSymbol(p,Math.min(age,p.duration),visible*q.alpha*(1-star),q.scale);ctx.restore();
   }
+  const landing=landingFlash(p,clock);
+  const clarity=skySparkleStrength(clock);
+  const gain=p.settle.twinkleGain+(1-p.settle.twinkleGain)*.8*clarity;
+  const flash=starTwinkle(clock-p.start-p.duration,p.settle.period,p.settle.offset)*gain;
   if(star>0){
-    const flash=p.settle.accent?starTwinkle(clock-p.start-p.duration-.65,p.settle.period,p.settle.offset):0;
-    const shimmer=.86+.14*Math.sin(clock*.8+p.phase),r=p.settle.radius+flash*.65;
-    ctx.save();ctx.globalAlpha=star*(shimmer*p.settle.brightness*(1-flash)+flash);ctx.fillStyle='#eef3ff';
+    const shimmer=.86+.14*Math.sin(clock*Math.PI*2/SKY_LOOP+p.phase),r=p.settle.radius+flash*(.25+.3*clarity);
+    ctx.save();ctx.globalAlpha=star*(shimmer*p.settle.brightness*(1-flash)+flash);ctx.fillStyle=p.settle.color;
     ctx.beginPath();ctx.arc(p.endX,p.endY,r,0,Math.PI*2);ctx.fill();
-    ctx.globalAlpha=star;
-    if(p.settle.accent)glint(p.endX,p.endY,flash,10+p.settle.radius*2,'star');
     ctx.restore();
   }
+  // 每件物品都在自己的落点继续闪烁；落定的亮芒与后续星芒共用同一处亮核。
+  const light=Math.max(landing,star*flash);
+  if(light>.015){
+    const baseSize=p.settle.twinkleSize+landing*(p.settle.anchor?4:1.5);
+    const size=baseSize*(1+clarity*(p.settle.accent?.45:.35));
+    // 只伸展尖芒和亮核；外围光晕沿用原大小，保持暗部清透。
+    drawStarGlow(p.endX,p.endY,baseSize*2,light*(p.settle.anchor||p.settle.accent?.52:.32));
+    ctx.save();ctx.globalAlpha=1;glint(p.endX,p.endY,light,size,'star');ctx.restore();
+  }
+}
+
+function composerOpacity(time){
+  if(reduce||editing||!cycle?.composerExit)return 1;
+  const {start,end}=cycle.composerExit;
+  return 1-smooth((time-start)/(end-start));
 }
 
 function paint(){
   clock=playback.time;ctx.clearRect(0,0,W,H);
   if(!cycle)return;
-  const quiet=theme==='ink'&&!reduce&&!editing?smooth((clock-cycle.settledAt+2.8)/3.6):0;
-  composer.style.opacity=String(1-quiet*.76);
+  const opacity=composerOpacity(clock);
+  composer.style.opacity=String(opacity);composer.inert=opacity===0;
+  composer.style.pointerEvents=opacity===0?'none':'';
+  const light=sourceLight(clock);field.style.setProperty('--source-light',light.glow.toFixed(3));
   if(editing)return;
-  drawTyping(clock);drawStarfield();
+  drawTyping(clock);drawSourceBeam(light);drawStarfield();
   if(clock<cycle.sendAt)return;
   const waves=waterWaves(clock);drawWater(waves);
   for(const p of particles){
@@ -749,7 +957,7 @@ function paint(){
   }
   for(const p of cycle.drawOrder){
     const age=clock-p.start;if(age<0)continue;
-    if(p.settle){drawInkItem(p,age);continue;}
+    if(p.settle){drawSettlingItem(p,age);continue;}
     if(age>flightEnd(p))continue;
     const q=poseAt(p,age),alpha=smooth(age/p.revealDuration)*q.alpha;
     if(alpha<.005)continue;
@@ -759,45 +967,39 @@ function paint(){
 
 function makeSoundEvents(){
   const events=[],push=(time,kind,extra={})=>events.push({time,kind,...extra});
-  if(!cycle.instant)Array.from(cycle.value).forEach((ch,i)=>{
-    if(!/[，。！？、\s]/.test(ch))push(.65+i*TYPE_INTERVAL+.04,'type',{gain:[.25,.22,.24][i%3],pan:-.15+i*.012,pitch:[0,-1,1][i%3]});
+  // 整段文字共用连续键盘录音，文字显现结束即收声。
+  if(!cycle.instant&&cycle.value.length)push(.65,'typing',{
+    duration:Array.from(cycle.value).length*TYPE_INTERVAL,gain:1.1,pan:0,pitch:0
   });
+  push(cycle.sendAt,'send',{duration:.18,gain:1.1,pan:0,pitch:0});
   if(reduce)return events;
   // 水声从中心向两边轻轻展开，没有滴答音头，随本轮发送开始和结束。
-  push(cycle.sendAt+.03,'ripple',{gain:.28,duration:2.8/TRANSFORM_RATE,pan:0,panTo:-.65,pitch:-3});
-  push(cycle.sendAt+.03,'ripple',{gain:.28,duration:2.8/TRANSFORM_RATE,pan:0,panTo:.65,pitch:3});
-  push(cycle.sendAt+WATER_LEAD+.2,'wind',{duration:4.1,gain:.16,pan:-.2,panTo:.3});
+  push(cycle.sendAt+.03,'ripple',{gain:.18,duration:2.8/TRANSFORM_RATE,pan:0,panTo:-.65,pitch:-3});
+  push(cycle.sendAt+.03,'ripple',{gain:.18,duration:2.8/TRANSFORM_RATE,pan:0,panTo:.65,pitch:3});
+  push(cycle.sendAt+WATER_LEAD+.2,'wind',{duration:1.8,gain:.08,pan:-.2,panTo:.3});
   // 选取几条光丝作飞行声，依据物品的起点、终点移动，尾音逐渐远去。
   const flights=particles.filter(p=>p.type==='symbol'&&p.hasTrail).sort((a,b)=>a.start-b.start);
   let last=-Infinity,count=0;
   for(const p of flights){
     if(p.start-last<.48||count>=4)continue;
-    push(p.start+.18,'flight',{duration:4.4/FLIGHT_RATE,gain:.46,pan:p.x/W*1.6-.8,panTo:Math.max(-.8,Math.min(.8,p.endX/W*1.6-.8)),pitch:[0,7,-5,2][count]});
+    push(p.start+.18,'flight',{duration:1.8,gain:.3,pan:p.x/W*1.6-.8,panTo:Math.max(-.8,Math.min(.8,p.endX/W*1.6-.8)),pitch:[0,7,-5,2][count]});
     last=p.start;count++;
   }
-  if(theme==='blue'){
-    const held=particles.filter(p=>p.kite).sort((a,b)=>a.start+a.kite.windAt-b.start-b.kite.windAt);
-    if(held.length){
-      push(held[0].start+held[0].kite.windAt,'wind',{duration:2.5,gain:.14,pan:.1,panTo:.45});
-      held.forEach((p,i)=>push(p.start+p.kite.releaseAt,'flight',{duration:3.2/FLIGHT_RATE,gain:.32,pan:.2,panTo:.75,pitch:[0,7,-5][i]}));
-    }
-  }else{
-    // 细碎光点组成连续的声音底色，不为每颗闪光触发一声铃响。
-    const start=cycle.firstSettle-.6,end=playback.duration-.15;
-    for(let time=start,i=0;time<end-1.8;time+=5.6,i++){
-      push(time,'galaxy',{duration:Math.min(8,end-time),gain:.62,pan:i%2? .35:-.35,panTo:i%2?-.25:.25,pitch:i%2?7:0});
-    }
-  }
+  // 主题随落定达到高点；星空形成后继续播放完整的八段音乐。
+  events.push(...StarLetterMusic.createScore({sendAt:cycle.sendAt,firstSettle:cycle.firstSettle,
+    loopStart:cycle.loopStart,waterLead:WATER_LEAD,loopDuration:SKY_LOOP}));
   return events.sort((a,b)=>a.time-b.time);
 }
 
 function buildCycle(value=DEFAULT_TEXT,instant=false){
+  for(const icon of [send,sendArrow,sendProgress])icon.getAnimations().forEach(animation=>animation.cancel());
   particles=[];busy=false;editing=false;input.disabled=false;words.style.visibility='visible';
   cycle={value,instant,sendAt:instant?.35:.65+Array.from(value).length*TYPE_INTERVAL+1.05};
   setText(value);
   const finish=prepareBurst(cycle.sendAt);
+  cycle.transformEnd=Math.max(cycle.sendAt+.6,...particles.map(p=>p.start+(p.type==='text'?p.duration:p.revealDuration)));
   cycle.drawOrder=particles.filter(p=>p.type==='symbol').sort((a,b)=>b.layer-a.layer||a.start-b.start);
-  playback.duration=theme==='ink'&&!reduce?cycle.settledAt+9:finish+1.2;
+  playback.duration=!reduce?cycle.loopStart+StarLetterMusic.sustainDuration:finish+1.2;
   playback.time=0;clock=0;playback.stamp=null;
   sound.setEvents(makeSoundEvents());
   prepareTyping(value);paint();updateControls();
@@ -818,28 +1020,39 @@ function updateControls(){
 }
 
 function updateSoundButton(){
-  controls.sound.textContent=sound.enabled?'音效开':'音效关';
-  controls.sound.setAttribute('aria-pressed',String(sound.enabled));
-  controls.sound.setAttribute('aria-label',sound.enabled?'关闭音效':'开启音效');
+  controls.sound.textContent=sound.requested?'音效开':'音效关';
+  controls.sound.setAttribute('aria-pressed',String(sound.requested));
+  controls.sound.setAttribute('aria-label',sound.requested?'关闭音效':'开启音效');
 }
-controls.sound.addEventListener('click',async()=>{
-  controls.sound.disabled=true;
-  try{
-    const requested=!sound.enabled;
-    controls.sound.textContent=requested?'准备音效…':'音效关';
-    controls.sound.setAttribute('aria-label',requested?'正在准备音效':'关闭音效');
-    const enabled=await sound.setEnabled(requested);
-    updateSoundButton();
-    if(requested&&!enabled){controls.sound.textContent='重试音效';controls.sound.setAttribute('aria-label','音效未能开启，点击重试');}
-  }finally{controls.sound.disabled=!sound.supported;updateControls();}
+controls.sound.addEventListener('click',()=>{
+  const pending=sound.setEnabled(!sound.requested);
+  updateSoundButton();
+  return pending.then(()=>{updateSoundButton();updateControls();});
 });
+function unlockSound(event){
+  if(!sound.requested||!sound.supported||event?.target?.closest?.('#play-sound'))return;
+  if(sound.enabled&&sound.context?.state==='running')return;
+  return sound.setEnabled(true).then(()=>{updateSoundButton();updateControls();});
+}
+document.addEventListener('click',unlockSound,{capture:true});
+document.addEventListener('keydown',unlockSound,{capture:true});
+
+function advancePlayback(elapsed){
+  if(!playback.playing)return;
+  const next=playback.time+Math.max(0,elapsed)*playback.rate;
+  if(!reduce&&cycle?.loopStart!==undefined&&next>=playback.duration){
+    playback.time=cycle.loopStart+(next-playback.duration)%StarLetterMusic.sustainDuration;
+  }else{
+    playback.time=Math.min(playback.duration,next);
+    if(playback.time>=playback.duration)playback.playing=false;
+  }
+}
 
 function render(stamp){
   const elapsed=playback.stamp===null?0:Math.max(0,(stamp-playback.stamp)/1000);
   playback.stamp=stamp;
   if(playback.ready&&playback.playing&&!document.hidden&&!editing){
-    playback.time=Math.min(playback.duration,playback.time+elapsed*playback.rate);
-    if(playback.time>=playback.duration)playback.playing=false;
+    advancePlayback(elapsed);
     paint();updateControls();
   }
   requestAnimationFrame(render);
@@ -867,7 +1080,7 @@ controls.speed.addEventListener('click',()=>{
 controls.theme.addEventListener('change',()=>{
   const wasPlaying=playback.playing,value=editing?text.trim()||DEFAULT_TEXT:cycle.value;
   dragging=false;theme=controls.theme.value;stage.dataset.theme=theme;document.body.dataset.theme=theme;
-  stage.setAttribute('aria-label',theme==='ink'?'星月来信，墨黑星河':'星月来信，三比四画幅');
+  stage.setAttribute('aria-label',theme==='ink'?'星月来信，墨黑星河':'星月来信，正蓝星河');
   buildCycle(value);playback.playing=wasPlaying;updateControls();
 });
 function applyFont(){
@@ -908,18 +1121,34 @@ addEventListener('resize',reflowCycle);
 document.addEventListener('visibilitychange',()=>{playback.stamp=null;updateControls();});
 addEventListener('pagehide',()=>{sound.sync({time:playback.time,rate:playback.rate,playing:false});});
 
+function stopTransformation(){
+  if(!sendWorkingAt(playback.time))return;
+  const icons=[send,sendArrow,sendProgress],before=icons.map(node=>({opacity:node.style.opacity,
+    ...(node===send?{}:{transform:node.style.transform})}));
+  busy=false;input.disabled=false;playback.time=0;clock=0;playback.stamp=null;
+  setText(cycle.value);manual();input.focus({preventScroll:true});
+  // 手动停止会暂停作品时间，用一次界面过渡完成同样的交接。
+  if(!reduce)icons.forEach((node,i)=>{
+    node.getAnimations().forEach(animation=>animation.cancel());
+    const after={opacity:node.style.opacity,...(node===send?{}:{transform:node.style.transform})};
+    node.animate([before[i],after],{duration:460,easing:'cubic-bezier(.22,1,.36,1)'});
+  });
+}
+
 function manual(){
   if(busy||editing||!playback.ready)return;
   editing=true;playback.playing=false;particles=[];water=null;
-  setText(text);words.style.visibility='visible';send.firstElementChild.style.transform='';send.firstElementChild.style.opacity='';
-  ctx.clearRect(0,0,W,H);composer.style.opacity='1';updateControls();
+  field.style.setProperty('--source-light','0');
+  setText(text);words.style.visibility='visible';updateSendState(clock);
+  ctx.clearRect(0,0,W,H);illuminationCtx.clearRect(0,0,W,H);clearGalaxySky();composer.style.opacity='1';composer.inert=false;
+  composer.style.pointerEvents='';updateControls();
 }
 input.addEventListener('focus',manual);
 input.addEventListener('compositionstart',()=>composing=true);
 input.addEventListener('compositionend',()=>{composing=false;setText(input.value);});
 input.addEventListener('input',()=>{text=input.value;if(!composing)setText(text);});
 input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing&&!composing){e.preventDefault();release();}});
-send.addEventListener('click',release);
+send.addEventListener('click',()=>{if(sendWorkingAt(playback.time))stopTransformation();else release();});
 setText('');
 function ready(){
   playback.ready=true;buildCycle();playback.playing=!reduce;
@@ -927,14 +1156,15 @@ function ready(){
   controls.sound.disabled=!sound.supported;updateSoundButton();
   if(!sound.supported){controls.sound.textContent='音效不可用';controls.sound.setAttribute('aria-label','当前浏览器不支持音效');}
   if(reduce){playback.time=cycle.sendAt-.01;paint();}updateControls();
+  unlockSound();
 }
-// 本地字体加载完成后再量字宽，避免切换时先使用备用字体造成跳动。
+// 本地字体与星空素材就绪后开始；图片用普通相对路径，文件直开即可加载。
 Promise.allSettled([
   document.fonts.load('20px "霞鹜文楷"'),
-  document.fonts.load('20px "Ma Shan Zheng"')
+  document.fonts.load('20px "Ma Shan Zheng"'),galaxyReady
 ]).then(results=>{
   const options=[...controls.font.options];
-  results.forEach((result,i)=>{options[i].disabled=result.status!=='fulfilled'||!result.value.length;});
+  results.slice(0,2).forEach((result,i)=>{options[i].disabled=result.status!=='fulfilled'||!result.value.length;});
   const available=options.filter(option=>!option.disabled);
   if(options[controls.font.selectedIndex].disabled&&available.length)controls.font.value=available[0].value;
   applyFont();ready();

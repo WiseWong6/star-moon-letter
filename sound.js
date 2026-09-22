@@ -1,19 +1,19 @@
-/* 与画面共用事件时间；声音仅在用户主动开启后生成，全程不请求外部资源。 */
+/* 与画面共用事件时间；预生成声音在本地加载，用户点击只解锁播放。 */
 (() => {
   'use strict';
 
-  const KINDS = new Set(['type', 'ripple', 'wind', 'flight', 'galaxy']);
-  const DEFAULT_DURATION = {type: .075, ripple: 2.8, wind: 2.8, flight: 4.4, galaxy: 8};
-  const LEVELS = {type: .1, ripple: .1, wind: .055, flight: .19, galaxy: .13};
-  const SAMPLE_RATE = 24000;
-  const TAU = Math.PI * 2;
+  const KINDS = new Set(['typing', 'send', 'ripple', 'wind', 'flight', 'leafTouch', 'galaxy']);
+  const DEFAULT_DURATION = {typing: 8, send: .18, ripple: 2.8 / 1.2, wind: 1.8, flight: 1.8, leafTouch: .95, galaxy: 8};
+  const LEVELS = {typing: .35, send: .45, ripple: .075, wind: .022, flight: .1, leafTouch: .14, galaxy: .075};
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const finite = (value, fallback) => Number.isFinite(value) ? value : fallback;
 
   class StarLetterSound {
     constructor() {
       this.Context = globalThis.AudioContext || globalThis.webkitAudioContext;
-      this.supported = typeof this.Context === 'function';
+      this.bank = globalThis.STAR_LETTER_AUDIO;
+      this.samples = new Map((this.bank?.clips || []).map(clip => [clip.key, clip.pcm]));
+      this.supported = typeof this.Context === 'function' && this.samples.size > 0;
       this.enabled = false;
       this.context = null;
       this.events = [];
@@ -22,15 +22,12 @@
       this.anchor = null;
       this.frame = null;
       this.cursor = 0;
-      this.requested = false;
+      this.requested = this.supported;
       this.toggleId = 0;
       this.destroyed = false;
       this.hasVoices = false;
-      this.lastStart = Object.create(null);
-      this.eventsVersion = 0;
-      this.preparedSignature = '';
-      this.preparation = null;
-      this.noiseReady = false;
+      this.warmTimer = null;
+      this.warmCache();
     }
 
     create() {
@@ -45,19 +42,6 @@
       this.limiter.release.value = .18;
       this.master.connect(this.limiter);
       this.limiter.connect(context.destination);
-
-      // 六秒固定噪声供所有短音共用，不运行常驻的振荡器或噪声节点。
-      this.noise = new Float32Array(SAMPLE_RATE * 6);
-    }
-
-    *prepareNoise() {
-      let seed = 4738291;
-      for (let i = 0; i < this.noise.length; i++) {
-        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-        this.noise[i] = seed / 2147483648 - 1;
-        if ((i + 1) % 2048 === 0) yield;
-      }
-      this.noiseReady = true;
     }
 
     async setEnabled(value) {
@@ -66,33 +50,26 @@
       if (!this.requested) {
         this.enabled = false;
         this.invalidate();
-        this.cancelPreparation();
         this.suspendWhenIdle();
         return false;
       }
       try {
         if (!this.context) this.create();
-        // 必须由按钮的用户操作直接调用，保留浏览器的音频解锁条件。
+        // 页面先尝试默认开启；若浏览器限制自动播放，首次交互再直接调用解锁。
         await this.context.resume();
-        // 波形逐小块准备，等待过程中画面的逐帧循环照常运行。
-        while (id === this.toggleId && this.requested && !this.destroyed) {
-          const rate = this.frame?.rate || 1;
-          await this.prepare(rate);
-          if (this.preparedSignature === `${this.eventsVersion}:${this.frame?.rate || 1}`) break;
-        }
+        this.warmCache();
         if (id !== this.toggleId || this.destroyed) {
           this.suspendWhenIdle();
           return this.enabled;
         }
         this.enabled = this.requested && this.context.state === 'running';
-        if (!this.enabled) this.requested = false;
         this.invalidate();
         if (this.enabled && this.frame) this.sync(this.frame);
         return this.enabled;
       } catch (_) {
         if (id === this.toggleId) {
           this.enabled = false;
-          this.requested = false;
+          // 未获播放许可时保留开关意愿，交互后可重试；主动关闭才设为 false。
           this.invalidate();
           this.suspendWhenIdle();
         }
@@ -113,11 +90,9 @@
           pitch: Math.round(clamp(finite(event.pitch, 0), -24, 24) * 2) / 2
         }))
         .sort((a, b) => a.time - b.time);
-      ++this.eventsVersion;
-      this.preparedSignature = '';
       // 换配色、重播或改文案时，上一组已排程的声音随即退出。
       this.invalidate();
-      if (this.requested && this.context) this.prepare(this.frame?.rate || 1);
+      this.warmCache();
     }
 
     suspendWhenIdle() {
@@ -143,178 +118,59 @@
       this.hasVoices = false;
       this.anchor = null;
       this.cursor = 0;
-      this.lastStart = Object.create(null);
     }
 
     bufferKey(event, rate) {
-      return `${event.kind}:${Math.round(event.duration / rate * 1000) / 1000}:${event.pitch}`;
+      return `${event.kind}:${event.pitch}:${rate}`;
+    }
+
+    loadBuffer(key) {
+      if (this.buffers.has(key)) return this.buffers.get(key);
+      const encoded = this.samples.get(key);
+      if (!encoded) return null;
+      const bytes = atob(encoded), length = bytes.length / 2;
+      // 创建无输出的声音缓存不需要开启音频设备；早到的点击也只需一次轻量解码。
+      const buffer = typeof globalThis.AudioBuffer === 'function'
+        ? new globalThis.AudioBuffer({numberOfChannels: 1, length, sampleRate: this.bank.sampleRate})
+        : this.context?.createBuffer(1, length, this.bank.sampleRate);
+      if (!buffer) return null;
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < length; i++) {
+        let sample = bytes.charCodeAt(i * 2) | bytes.charCodeAt(i * 2 + 1) << 8;
+        if (sample >= 32768) sample -= 65536;
+        data[i] = sample / 32768;
+      }
+      this.buffers.set(key, buffer);
+      return buffer;
     }
 
     bufferFor(event, rate) {
-      // 画面回调里的调度只读取缓存，绝不在这里同步计算声音。
-      return this.buffers.get(this.bufferKey(event, rate)) || null;
+      return this.loadBuffer(this.bufferKey(event, rate));
     }
 
-    cancelPreparation() {
-      if (!this.preparation) return;
-      clearTimeout(this.preparation.timer);
-      this.preparation.resolve(false);
-      this.preparation = null;
-    }
-
-    prepare(rate) {
-      const signature = `${this.eventsVersion}:${rate}`;
-      if (this.preparedSignature === signature) return Promise.resolve(true);
-      if (this.preparation?.signature === signature) return this.preparation.promise;
-      this.cancelPreparation();
-      const unique = new Map();
-      for (const event of this.events) {
-        const key = this.bufferKey(event, rate);
-        if (!this.buffers.has(key)) unique.set(key, event);
-        else {
-          // 本轮会用到的旧缓存移到队尾，避免补新音色时把它们淘汰。
-          const buffer = this.buffers.get(key);
-          this.buffers.delete(key);
-          this.buffers.set(key, buffer);
-        }
-      }
-      const job = {signature, rate, entries: [...unique], index: 0, generator: null, noise: false, timer: null};
-      job.promise = new Promise(resolve => { job.resolve = resolve; });
-      this.preparation = job;
+    warmCache() {
+      if (this.warmTimer !== null || this.destroyed || !this.supported) return;
+      if (typeof globalThis.AudioBuffer !== 'function' && !this.context) return;
+      const queue = [...this.samples.keys()].filter(key => !this.buffers.has(key));
+      if (!queue.length) return;
       const step = () => {
-        if (this.preparation !== job || this.destroyed || !this.requested) return;
-        try {
-          if (!job.generator) {
-            if (!this.noiseReady) {
-              job.noise = true;
-              job.generator = this.prepareNoise();
-            } else if (job.index < job.entries.length) {
-              job.noise = false;
-              job.generator = this.renderSamples(job.entries[job.index][1], rate);
-            } else {
-              this.preparedSignature = signature;
-              this.preparation = null;
-              job.resolve(true);
-              if (this.enabled) {
-                this.invalidate();
-                if (this.frame) this.sync(this.frame);
-              }
-              return;
-            }
-          }
-          const result = job.generator.next();
-          if (result.done) {
-            if (!job.noise) {
-              const data = result.value;
-              const buffer = this.context.createBuffer(1, data.length, SAMPLE_RATE);
-              buffer.getChannelData(0).set(data);
-              if (this.buffers.size >= 48) this.buffers.delete(this.buffers.keys().next().value);
-              this.buffers.set(job.entries[job.index][0], buffer);
-              ++job.index;
-            }
-            job.generator = null;
-          }
-          // 音色每次计算 1024 个采样，噪声底和归一化最多 2048 个，减少准备时卡顿。
-          job.timer = setTimeout(step, 0);
-        } catch (_) {
-          this.preparation = null;
-          this.requested = false;
-          this.enabled = false;
-          this.invalidate();
-          this.suspendWhenIdle();
-          job.resolve(false);
-        }
+        this.warmTimer = null;
+        if (this.destroyed) return;
+        const key = queue.shift();
+        try { this.loadBuffer(key); } catch (_) { return; }
+        if (queue.length) this.warmTimer = setTimeout(step, 0);
       };
-      job.timer = setTimeout(step, 0);
-      return job.promise;
-    }
-
-    *renderSamples(event, rate) {
-      // 倍速只改变音效时长，飞行与星河的音高保持。
-      const duration = Math.round(event.duration / rate * 1000) / 1000;
-      const length = Math.max(2, Math.round(duration * SAMPLE_RATE));
-      const data = new Float32Array(length);
-      const pitch = 2 ** (event.pitch / 12);
-      const noiseOffset = Math.floor((event.pitch + 25) * 977) % this.noise.length;
-      // 星河是一片互相交叠的柔音颗粒；每粒缓缓亮起，没有敲钟式音头。
-      const grains = [];
-      if (event.kind === 'galaxy') {
-        let seed = 8941 + Math.round((event.pitch + 24) * 631);
-        const next = () => {seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;return seed / 4294967296;};
-        const notes = [523.251, 587.33, 659.255, 783.991, 1046.502, 1174.66, 1318.51];
-        for (let j = 0; j < 32; j++) grains.push({
-          at: next() * .84, span: .10 + next() * .19,
-          frequency: notes[Math.floor(next() * notes.length)] * pitch,
-          phase: next() * TAU, level: .08 + next() * .13
-        });
-      }
-      let low = 0, deep = 0, air = 0, peak = 0;
-      for (let i = 0; i < length; i++) {
-        const t = i / SAMPLE_RATE, u = i / (length - 1);
-        const white = this.noise[(i + noiseOffset) % this.noise.length];
-        const airCutoff = event.kind === 'wind' ? 700 + 650 * Math.sin(Math.PI * u) : 1900;
-        low += (1 - Math.exp(-TAU * airCutoff / SAMPLE_RATE)) * (white - low);
-        deep += (1 - Math.exp(-TAU * 105 / SAMPLE_RATE)) * (low - deep);
-        air += (1 - Math.exp(-TAU * 3100 / SAMPLE_RATE)) * (white - air);
-        let sample = 0;
-        if (event.kind === 'type') {
-          // 短键程按下与轻微回键，不叠加有音高的共鸣。
-          const press = (1 - Math.exp(-u / .012)) * Math.exp(-u * 19);
-          const releaseTime = Math.max(0, u - .31);
-          const release = (1 - Math.exp(-releaseTime / .018)) * Math.exp(-releaseTime * 23) * .22;
-          sample = ((low - deep) * .8 + (air - low) * .55) * (press + release);
-        } else if (event.kind === 'ripple') {
-          // 连续的轻水面声，从静止中升起，再散开；不再使用三次滴水敲击。
-          const envelope = Math.sin(Math.PI * u) ** 2;
-          const ripple = .8 + .2 * Math.sin(TAU * u * 2.4);
-          sample = ((low - deep) * .46 + (air - low) * .025) * envelope * ripple;
-        } else if (event.kind === 'wind') {
-          const envelope = Math.sin(Math.PI * u) ** 2;
-          const breath = .92 + .08 * Math.sin(TAU * u * 1.3);
-          sample = (low - deep) * .5 * envelope * breath;
-        } else if (event.kind === 'flight') {
-          const envelope = Math.sin(Math.PI * u) ** 1.8 * (1 - .42 * u);
-          // 空气中细软的一次掠过，轻微滑落的泛音留在噪声之下。
-          const phase = TAU * pitch * (620 * t - 110 * t * t / duration);
-          const silk = Math.sin(phase) * .045 + Math.sin(phase * 1.501 + .6) * .015;
-          sample = ((low - deep) * .54 + (air - low) * .075 + silk) * envelope;
-        } else if (event.kind === 'galaxy') {
-          for (const grain of grains) {
-            const q = (u - grain.at) / grain.span;
-            if (q <= 0 || q >= 1) continue;
-            const local = (u - grain.at) * duration;
-            const envelope = Math.sin(Math.PI * q) ** 2;
-            const tone = Math.sin(TAU * grain.frequency * local + grain.phase)
-              + .06 * Math.sin(TAU * grain.frequency * 2.001 * local + grain.phase);
-            sample += tone * envelope * grain.level;
-          }
-          // 整片缓慢起落，交叠后成为星河的余光，听不出规则的逐颗提示。
-          sample *= Math.sin(Math.PI * u) ** 1.4;
-        }
-        // 每个缓存样本两端归零；短音的结束与中途暂停都不制造尖锐瞬变。
-        const edge = Math.min(1, t / (event.kind === 'type' ? .001 : .004), (duration - t) / .025);
-        data[i] = sample * Math.max(0, edge);
-        peak = Math.max(peak, Math.abs(data[i]));
-        if ((i + 1) % 1024 === 0) yield;
-      }
-      // 不将本来很轻的水声和风声强行放大到与飞行声一样响。
-      const normalizer = peak > 0 ? .72 / Math.max(.38, peak) : 0;
-      for (let i = 0; i < length; i++) {
-        data[i] *= normalizer;
-        if ((i + 1) % 2048 === 0) yield;
-      }
-      return data;
+      // 分帧展开预生成的声音数据，不在点击时合成波形。
+      this.warmTimer = setTimeout(step, 0);
     }
 
     schedule(event, when, rate, offset = 0) {
       if (event.gain <= 0 || this.voices.size >= 14) return;
       const buffer = this.bufferFor(event, rate);
       if (!buffer) return;
-      const remaining = buffer.duration - offset;
+      const activeDuration = Math.min(buffer.duration, event.duration / rate);
+      const remaining = activeDuration - offset;
       if (remaining <= .025) return;
-      const gap = event.kind === 'type' ? .12 : 0;
-      if (when - (this.lastStart[event.kind] ?? -Infinity) < gap) return;
-      this.lastStart[event.kind] = when;
       const context = this.context;
       const source = context.createBufferSource();
       source.buffer = buffer;
@@ -329,7 +185,7 @@
       source.connect(gain);
       if (pan) {
         const from = clamp(event.pan, -.85, .85), to = clamp(event.panTo, -.85, .85);
-        pan.pan.setValueAtTime(from + (to - from) * offset / source.buffer.duration, when);
+        pan.pan.setValueAtTime(from + (to - from) * offset / activeDuration, when);
         if (from !== to) pan.pan.linearRampToValueAtTime(to, when + remaining);
         gain.connect(pan);
         pan.connect(this.master);
@@ -345,7 +201,11 @@
         if (!this.voices.size) this.hasVoices = false;
         this.suspendWhenIdle();
       };
-      source.start(when, offset);
+      // 末段星河声可能被时间线截短，单独收尾避免突然切断。
+      const fade = Math.min((event.kind === 'send' ? .018 : event.kind === 'typing' ? .05 : .3) / rate, remaining * .4);
+      gain.gain.setValueAtTime(level, when + remaining - fade);
+      gain.gain.linearRampToValueAtTime(0, when + remaining);
+      source.start(when, offset, remaining);
     }
 
     sync(frame) {
@@ -353,7 +213,7 @@
       const rate = clamp(finite(frame?.rate, 1), .25, 4);
       const playing = Boolean(frame?.playing);
       this.frame = {time, rate, playing};
-      if (this.requested && this.context && !this.destroyed) this.prepare(rate);
+
       if (!this.enabled || !this.context || this.destroyed) return;
       if (!playing || this.context.state !== 'running') {
         if (this.anchor || this.hasVoices) this.invalidate();
@@ -375,11 +235,10 @@
         }
         this.cursor = low;
         // 暂停后续播或拖到中段，仅续上此刻尚未结束的长音。
-        // 跳过的字音不补播；偏移也恢复水面、飞行和星河当时的左右位置。
+        // 连续键盘声从对应位置续上；水面、飞行和星河也恢复当时的左右位置。
         for (let i = low - 1; i >= 0; i--) {
           const event = this.events[i];
           if (event.time < time - 8) break;
-          if (event.kind === 'type') continue;
           if (event.time + event.duration - time <= .04 * rate) continue;
           this.schedule(event, now + .004, rate, (time - event.time) / rate);
         }
@@ -399,7 +258,8 @@
       this.enabled = false;
       ++this.toggleId;
       this.invalidate();
-      this.cancelPreparation();
+      clearTimeout(this.warmTimer);
+      this.warmTimer = null;
       for (const voice of this.voices) {
         voice.source.onended = null;
         try { voice.source.stop(); } catch (_) { /* 声源已结束。 */ }
@@ -410,7 +270,8 @@
       this.voices.clear();
       this.buffers.clear();
       this.events = [];
-      this.noise = null;
+      this.samples.clear();
+      this.bank = null;
       this.frame = null;
       if (this.master) this.master.disconnect();
       if (this.limiter) this.limiter.disconnect();
