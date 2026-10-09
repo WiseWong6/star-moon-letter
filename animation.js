@@ -45,7 +45,7 @@ const clamp = x => Math.max(0,Math.min(1,x));
 const smooth = x => {x=clamp(x);return x*x*(3-2*x);};
 
 function resize(){
-  const rect=stage.getBoundingClientRect(), d=Math.min(devicePixelRatio||1,2);
+  const rect=stage.getBoundingClientRect(), d=Math.min(devicePixelRatio||1,window.CANVAS_DPR_CAP||2);
   viewScale=rect.width/W;
   canvas.width=Math.round(rect.width*d);canvas.height=Math.round(rect.height*d);
   ctx.setTransform(canvas.width/W,0,0,canvas.height/H,0,0);

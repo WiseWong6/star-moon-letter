@@ -18,6 +18,6 @@
 | `animation.js` | 动画主线（文字、飞行、银河、星芒） |
 | `sound.js` / `chime-score.js` | 声音调度与原创风铃乐谱 |
 | `assets/` | 银河底图、星点数据、字体与声音资产（见 `assets/README.md`） |
-| `scripts/` | 音频构建、检查与确定性视频导出（`export-video.cjs`） |
+| `scripts/` | 音频构建、检查与确定性视频导出（`export-video.cjs`，`EXPORT_SCALE=4` 出 4K、`EXPORT_THEME=blue` 出正蓝） |
 
 遵守上级目录的统一播放控件与项目约定。
