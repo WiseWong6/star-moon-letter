@@ -68,7 +68,7 @@ async function main() {
     console.log(JSON.stringify(info));
     if (setupErrors.length) throw Error(setupErrors.join('\n'));
     const VD = Math.min(process.env.EXPORT_LIMIT_SECONDS ? Number(process.env.EXPORT_LIMIT_SECONDS) : Infinity,
-      Math.max(info.duration, info.lastEnd)); // 视频覆盖完整时间线与最后一个音的收尾
+      info.duration); // 以作品声明时长为准；结尾由淡出收束
     const frames = Math.round(VD * FPS);
 
     // ---- 页面内离线音频：复用 sound.schedule，只替换上下文与主链（音频与主题、分辨率无关，烘焙一次即可） ----
@@ -152,7 +152,9 @@ async function main() {
     const ff = spawn('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'warning',
       '-framerate', String(FPS), '-start_number', '0', '-i', path.join(work, 'frame-%06d.jpg'), '-i', wavPath,
       '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac', '-b:a', '256k', '-movflags', '+faststart', '-t', String(frames / FPS), videoPath],
+      '-vf', 'fade=t=out:st=' + (VD - 1).toFixed(2) + ':d=1',
+      '-c:a', 'aac', '-b:a', '256k', '-af', 'afade=t=out:st=' + (VD - 1.6).toFixed(2) + ':d=1.6',
+      '-movflags', '+faststart', '-t', String(frames / FPS), videoPath],
       {stdio: ['ignore', 'ignore', log]});
     const [code] = await once(ff, 'close'); fs.closeSync(log);
     if (code !== 0) throw Error(fs.readFileSync(path.join(work, 'ffmpeg.log'), 'utf8'));

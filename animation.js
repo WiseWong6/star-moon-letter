@@ -999,7 +999,7 @@ function buildCycle(value=DEFAULT_TEXT,instant=false){
   const finish=prepareBurst(cycle.sendAt);
   cycle.transformEnd=Math.max(cycle.sendAt+.6,...particles.map(p=>p.start+(p.type==='text'?p.duration:p.revealDuration)));
   cycle.drawOrder=particles.filter(p=>p.type==='symbol').sort((a,b)=>b.layer-a.layer||a.start-b.start);
-  playback.duration=!reduce?cycle.loopStart+StarLetterMusic.sustainDuration:finish+1.2;
+  playback.duration=!reduce?Math.min(25,cycle.loopStart+StarLetterMusic.sustainDuration):finish+1.2;
   playback.time=0;clock=0;playback.stamp=null;
   sound.setEvents(makeSoundEvents());
   prepareTyping(value);paint();updateControls();
@@ -1041,7 +1041,7 @@ function advancePlayback(elapsed){
   if(!playback.playing)return;
   const next=playback.time+Math.max(0,elapsed)*playback.rate;
   if(!reduce&&cycle?.loopStart!==undefined&&next>=playback.duration){
-    playback.time=cycle.loopStart+(next-playback.duration)%StarLetterMusic.sustainDuration;
+    playback.time=cycle.loopStart+(next-playback.duration)%Math.max(.5,playback.duration-cycle.loopStart);
   }else{
     playback.time=Math.min(playback.duration,next);
     if(playback.time>=playback.duration)playback.playing=false;
